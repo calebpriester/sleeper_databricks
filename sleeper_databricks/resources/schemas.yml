@@ -1,0 +1,18 @@
+resources:
+  schemas:
+    sleeper_raw:
+      name: sleeper_raw
+      catalog_name: ${var.catalog}
+      comment: Raw data ingested from Sleeper APIs
+    sleeper_core:
+      name: sleeper_core
+      catalog_name: ${var.catalog}
+      comment: sleeper_core
+    sleeper_trades:
+      name: sleeper_trades
+      catalog_name: ${var.catalog}
+      comment: sleeper_trades
+    sleeper_marts:
+      name: sleeper_marts
+      catalog_name: ${var.catalog}
+      comment: sleeper_marts

@@ -1,0 +1,27 @@
+resources:
+  jobs:
+    sleeper_databricks_job:
+      name: sleeper_databricks_job
+
+      tasks:
+        - task_key: ingest_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.sleeper_ingest_pipeline.id}
+
+        - task_key: core_pipeline
+          depends_on:
+            - task_key: ingest_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.sleeper_core_pipeline.id}
+
+        - task_key: trades_pipeline
+          depends_on:
+            - task_key: core_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.sleeper_trades_pipeline.id}
+
+        - task_key: marts_pipeline
+          depends_on:
+            - task_key: trades_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.sleeper_marts_pipeline.id}

@@ -1,0 +1,39 @@
+# The main pipeline for sleeper_databricks
+
+resources:
+  pipelines:
+    sleeper_ingest_pipeline:
+      name: sleeper_ingest
+      catalog: ${resources.schemas.sleeper_raw.catalog_name}
+      schema: ${resources.schemas.sleeper_raw.name}
+      serverless: true
+      libraries:
+        - glob:
+            include: ../src/ingestion/**
+
+    sleeper_core_pipeline:
+      name: sleeper_core
+      catalog: ${resources.schemas.sleeper_core.catalog_name}
+      schema: ${resources.schemas.sleeper_core.name}
+      serverless: true
+      libraries:
+        - glob:
+            include: ../src/core/**
+
+    sleeper_trades_pipeline:
+      name: sleeper_trades
+      catalog: ${resources.schemas.sleeper_trades.catalog_name}
+      schema: ${resources.schemas.sleeper_trades.name}
+      serverless: true
+      libraries:
+        - glob:
+            include: ../src/trades/**
+
+    sleeper_marts_pipeline:
+      name: sleeper_marts
+      catalog: ${resources.schemas.sleeper_marts.catalog_name}
+      schema: ${resources.schemas.sleeper_marts.name}
+      serverless: true
+      libraries:
+        - glob:
+            include: ../src/marts/**
