@@ -18,7 +18,7 @@ resources:
       serverless: true
       libraries:
         - notebook:
-            path: ../src/core/core_pipeline_sql_v5.ipynb
+            path: ../src/core/core_pipeline_sql.ipynb
 
     sleeper_trades_pipeline:
       name: sleeper_trades
@@ -27,7 +27,7 @@ resources:
       serverless: true
       libraries:
         - notebook:
-            path: ../src/trades/trades_pipeline_sql_v5.ipynb
+            path: ../src/trades/trades_pipeline_sql.ipynb
 
     sleeper_marts_pipeline:
       name: sleeper_marts
