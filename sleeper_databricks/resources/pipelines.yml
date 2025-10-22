@@ -35,5 +35,5 @@ resources:
       schema: ${resources.schemas.sleeper_marts.name}
       serverless: true
       libraries:
-        - glob:
-            include: ../src/marts/**
+        - notebook:
+            path: ../src/marts/marts_pipeline_sql.ipynb
