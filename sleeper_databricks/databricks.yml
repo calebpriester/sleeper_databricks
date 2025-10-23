@@ -12,10 +12,6 @@ include:
 variables:
   catalog:
     description: The catalog to use
-  ingest_schema:
-    description: The schema to use for Sleeper data ingestion
-  analysis_schema:
-    description: The schema to use for Sleeper data analysis
 
 targets:
   # dev:
@@ -39,8 +35,6 @@ targets:
       root_path: /Workspace/Users/calebhpriester@gmail.com/.bundle/${bundle.name}/${bundle.target}
     variables:
       catalog: workspace
-      ingest_schema: sleeper_raw
-      analysis_schema: sleeper_analysis
     permissions:
       - user_name: calebhpriester@gmail.com
         level: CAN_MANAGE

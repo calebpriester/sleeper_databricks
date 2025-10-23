@@ -1,0 +1,16 @@
+
+.databricks
+
+# Debug and development files
+debug_queries/
+*.sql
+*DEBUG*.md
+*SESSION*.md
+*PHASE*.md
+*CHANGES*.md
+*FIX_VERIFICATION*.md
+*PICK_ATTRIBUTION*.md
+
+# IDE
+.vscode/
+.claude/

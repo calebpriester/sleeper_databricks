@@ -17,8 +17,8 @@ resources:
       schema: ${resources.schemas.sleeper_core.name}
       serverless: true
       libraries:
-        - glob:
-            include: ../src/core/**
+        - notebook:
+            path: ../src/core/core_pipeline_sql.ipynb
 
     sleeper_trades_pipeline:
       name: sleeper_trades
@@ -26,8 +26,8 @@ resources:
       schema: ${resources.schemas.sleeper_trades.name}
       serverless: true
       libraries:
-        - glob:
-            include: ../src/trades/**
+        - notebook:
+            path: ../src/trades/trades_pipeline_sql.ipynb
 
     sleeper_marts_pipeline:
       name: sleeper_marts
@@ -35,5 +35,5 @@ resources:
       schema: ${resources.schemas.sleeper_marts.name}
       serverless: true
       libraries:
-        - glob:
-            include: ../src/marts/**
+        - notebook:
+            path: ../src/marts/marts_pipeline_sql.ipynb
