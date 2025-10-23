@@ -1,0 +1,2243 @@
+{
+  "datasets": [
+    {
+      "name": "d87ca0ef",
+      "displayName": "Trade Winners",
+      "queryLines": [
+        "SELECT\n",
+        "  transaction_id,\n",
+        "  trade_season,\n",
+        "  roster_a_manager,\n",
+        "  roster_b_manager,\n",
+        "  ROUND(roster_a_points, 1) AS roster_a_points,\n",
+        "  ROUND(roster_b_points, 1) AS roster_b_points,\n",
+        "  ROUND(point_differential, 1) AS point_differential,\n",
+        "  winner_manager,\n",
+        "  loser_manager,\n",
+        "  ROUND(trade_impact_magnitude, 1) AS trade_impact_magnitude,\n",
+        "  trade_is_complete,\n",
+        "  CONCAT(roster_a_manager, ' vs ', roster_b_manager) AS managers,\n",
+        "  CASE WHEN ROW_NUMBER() OVER (\n",
+        "    ORDER BY trade_impact_magnitude DESC\n",
+        "  ) <= 10 THEN TRUE ELSE FALSE END AS is_top_10,\n",
+        "  CASE WHEN ROW_NUMBER() OVER (\n",
+        "    ORDER BY trade_impact_magnitude ASC\n",
+        "  ) <= 10 THEN TRUE ELSE FALSE END AS is_bottom_10\n",
+        "FROM workspace.sleeper_trades.agg_trade_winners_enriched\n",
+        "WHERE cluster_key = 'league_of_inches'\n",
+        "  AND trade_is_complete = TRUE\n",
+        "ORDER BY trade_impact_magnitude DESC;"
+      ]
+    },
+    {
+      "name": "b1d1ec51",
+      "displayName": "Trade Asset Breakdown",
+      "queryLines": [
+        "WITH received_players AS (\n",
+        "  SELECT\n",
+        "    fa.transaction_id,\n",
+        "    tw.trade_season,\n",
+        "    fa.side_roster_id as receiving_roster,\n",
+        "    CASE\n",
+        "      WHEN fa.side_roster_id = tw.roster_a THEN tw.roster_b_manager\n",
+        "      ELSE tw.roster_a_manager\n",
+        "    END as manager_gave_away,\n",
+        "    CASE\n",
+        "      WHEN fa.side_roster_id = tw.roster_a THEN tw.roster_a_manager\n",
+        "      ELSE tw.roster_b_manager\n",
+        "    END as manager_received,\n",
+        "    CONCAT(tw.roster_a_manager, ' - ', tw.roster_b_manager, ' ', tw.trade_season, ' (', fa.transaction_id, ')') as lookup_key,\n",
+        "    'player' as asset_type,\n",
+        "    p.full_name as asset_name,\n",
+        "    p.position,\n",
+        "    fa.player_id,\n",
+        "    COALESCE(SUM(pp.points), 0) as total_career_points\n",
+        "  FROM sleeper_trades.agg_trade_winners_enriched tw\n",
+        "  JOIN sleeper_trades.fact_trade_player_assets fa\n",
+        "    ON tw.transaction_id = fa.transaction_id\n",
+        "    AND fa.direction = 'incoming'\n",
+        "  JOIN sleeper_core.dim_players p ON fa.player_id = p.player_id\n",
+        "  LEFT JOIN sleeper_trades.fact_trade_player_points_multi_season pp\n",
+        "    ON fa.transaction_id = pp.transaction_id\n",
+        "    AND fa.side_roster_id = pp.side_roster_id\n",
+        "    AND fa.player_id = pp.player_id\n",
+        "  WHERE tw.cluster_key = 'league_of_inches'\n",
+        "    AND tw.trade_is_complete = TRUE\n",
+        "  GROUP BY fa.transaction_id, tw.trade_season, fa.side_roster_id, tw.roster_a, tw.roster_b,\n",
+        "           tw.roster_a_manager, tw.roster_b_manager, p.full_name, p.position, fa.player_id\n",
+        "),\n",
+        "received_picks AS (\n",
+        "  SELECT\n",
+        "    fpa.transaction_id,\n",
+        "    tw.trade_season,\n",
+        "    fpa.side_roster_id as receiving_roster,\n",
+        "    CASE\n",
+        "      WHEN fpa.side_roster_id = tw.roster_a THEN tw.roster_b_manager\n",
+        "      ELSE tw.roster_a_manager\n",
+        "    END as manager_gave_away,\n",
+        "    CASE\n",
+        "      WHEN fpa.side_roster_id = tw.roster_a THEN tw.roster_a_manager\n",
+        "      ELSE tw.roster_b_manager\n",
+        "    END as manager_received,\n",
+        "    CONCAT(tw.roster_a_manager, ' - ', tw.roster_b_manager, ' ', tw.trade_season, ' (', fpa.transaction_id, ')') as lookup_key,\n",
+        "    'pick' as asset_type,\n",
+        "    CASE\n",
+        "      WHEN bp.player_id IS NOT NULL THEN CONCAT(fpa.pick_season, ' Round ', fpa.round, ' (', p.full_name, ')')\n",
+        "      ELSE CONCAT(fpa.pick_season, ' Round ', fpa.round, ' (unrealized)')\n",
+        "    END as asset_name,\n",
+        "    p.position,\n",
+        "    bp.player_id,\n",
+        "    COALESCE(SUM(pp.points), 0) as total_career_points\n",
+        "  FROM sleeper_trades.agg_trade_winners_enriched tw\n",
+        "  JOIN sleeper_trades.fact_trade_pick_assets fpa\n",
+        "    ON tw.transaction_id = fpa.transaction_id\n",
+        "  LEFT JOIN sleeper_trades.bridge_trade_pick_to_player bp\n",
+        "    ON fpa.league_id = bp.league_id\n",
+        "    AND fpa.transaction_id = bp.transaction_id\n",
+        "    AND fpa.side_roster_id = bp.side_roster_id\n",
+        "    AND fpa.pick_season = bp.pick_season\n",
+        "    AND fpa.round = bp.round\n",
+        "  LEFT JOIN sleeper_trades.fact_trade_pick_points_career pp\n",
+        "    ON bp.transaction_id = pp.transaction_id\n",
+        "    AND bp.side_roster_id = pp.side_roster_id\n",
+        "    AND bp.player_id = pp.player_id\n",
+        "  LEFT JOIN sleeper_core.dim_players p ON bp.player_id = p.player_id\n",
+        "  WHERE tw.cluster_key = 'league_of_inches'\n",
+        "    AND tw.trade_is_complete = TRUE\n",
+        "  GROUP BY fpa.transaction_id, tw.trade_season, fpa.side_roster_id, tw.roster_a, tw.roster_b,\n",
+        "           tw.roster_a_manager, tw.roster_b_manager, fpa.pick_season, fpa.round,\n",
+        "           bp.player_id, p.full_name, p.position\n",
+        ")\n",
+        "SELECT\n",
+        "  transaction_id,\n",
+        "  trade_season,\n",
+        "  manager_gave_away,\n",
+        "  manager_received,\n",
+        "  lookup_key,\n",
+        "  asset_type,\n",
+        "  asset_name,\n",
+        "  position,\n",
+        "  player_id,\n",
+        "  ROUND(total_career_points, 1) as career_points_given_away\n",
+        "FROM received_players\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  transaction_id,\n",
+        "  trade_season,\n",
+        "  manager_gave_away,\n",
+        "  manager_received,\n",
+        "  lookup_key,\n",
+        "  asset_type,\n",
+        "  asset_name,\n",
+        "  position,\n",
+        "  player_id,\n",
+        "  ROUND(total_career_points, 1) as career_points_given_away\n",
+        "FROM received_picks\n",
+        "ORDER BY transaction_id, manager_gave_away, asset_type DESC, career_points_given_away DESC;"
+      ]
+    },
+    {
+      "name": "f10c9df0",
+      "displayName": "Manager Trade Win/Loss Record",
+      "queryLines": [
+        "WITH manager_trades AS (\n",
+        "  SELECT\n",
+        "    CASE\n",
+        "      WHEN roster_a_manager = roster_b_manager THEN NULL  -- Skip self-trades\n",
+        "      ELSE roster_a_manager\n",
+        "    END as manager_name,\n",
+        "    CASE\n",
+        "      WHEN winner_manager = roster_a_manager THEN 'win'\n",
+        "      WHEN loser_manager = roster_a_manager THEN 'loss'\n",
+        "      ELSE 'tie'\n",
+        "    END as outcome,\n",
+        "    roster_a_points - roster_b_points as point_differential,\n",
+        "    trade_impact_magnitude\n",
+        "  FROM workspace.sleeper_trades.agg_trade_winners_enriched\n",
+        "  WHERE cluster_key = 'league_of_inches'\n",
+        "    AND trade_is_complete = TRUE\n",
+        "\n",
+        "  UNION ALL\n",
+        "\n",
+        "  SELECT\n",
+        "    CASE\n",
+        "      WHEN roster_a_manager = roster_b_manager THEN NULL\n",
+        "      ELSE roster_b_manager\n",
+        "    END as manager_name,\n",
+        "    CASE\n",
+        "      WHEN winner_manager = roster_b_manager THEN 'win'\n",
+        "      WHEN loser_manager = roster_b_manager THEN 'loss'\n",
+        "      ELSE 'tie'\n",
+        "    END as outcome,\n",
+        "    roster_b_points - roster_a_points as point_differential,\n",
+        "    trade_impact_magnitude\n",
+        "  FROM workspace.sleeper_trades.agg_trade_winners_enriched\n",
+        "  WHERE cluster_key = 'league_of_inches'\n",
+        "    AND trade_is_complete = TRUE\n",
+        ")\n",
+        "SELECT\n",
+        "  manager_name,\n",
+        "  COUNT(*) as total_trades,\n",
+        "  SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) as wins,\n",
+        "  SUM(CASE WHEN outcome = 'loss' THEN 1 ELSE 0 END) as losses,\n",
+        "  SUM(CASE WHEN outcome = 'tie' THEN 1 ELSE 0 END) as ties,\n",
+        "  ROUND(SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as win_pct,\n",
+        "  ROUND(SUM(point_differential), 1) as total_point_differential,\n",
+        "  ROUND(AVG(point_differential), 1) as avg_point_differential,\n",
+        "  ROUND(MAX(CASE WHEN outcome = 'win' THEN trade_impact_magnitude END), 1) as best_trade_magnitude,\n",
+        "  ROUND(MAX(CASE WHEN outcome = 'loss' THEN trade_impact_magnitude END), 1) * -1 as worst_trade_magnitude\n",
+        "FROM manager_trades\n",
+        "WHERE manager_name IS NOT NULL\n",
+        "GROUP BY manager_name\n",
+        "ORDER BY win_pct DESC;"
+      ]
+    },
+    {
+      "name": "69d97b3d",
+      "displayName": "Top Scorers by Manager (All-Time)",
+      "queryLines": [
+        "WITH player_games_started AS (\n",
+        "  SELECT\n",
+        "    mr.manager_display_name,\n",
+        "    mr.cluster_key,\n",
+        "    pw.player_id,\n",
+        "    COUNT(*) AS games_started\n",
+        "  FROM workspace.sleeper_core.fact_player_week pw\n",
+        "  JOIN workspace.sleeper_core.fact_player_week_enriched pwe\n",
+        "    ON pw.league_id = pwe.league_id\n",
+        "    AND pw.season = pwe.season\n",
+        "    AND pw.week = pwe.week\n",
+        "    AND pw.player_id = pwe.player_id\n",
+        "  LEFT JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
+        "    ON pw.league_id = mr.league_id\n",
+        "    AND pw.roster_id = mr.roster_id\n",
+        "    AND pw.season = mr.season\n",
+        "  WHERE mr.cluster_key = 'league_of_inches'\n",
+        "    AND pw.was_started = TRUE\n",
+        "  GROUP BY mr.manager_display_name, mr.cluster_key, pw.player_id\n",
+        "),\n",
+        "player_career_by_manager AS (\n",
+        "  SELECT\n",
+        "    mr.manager_display_name,\n",
+        "    mr.cluster_key,\n",
+        "    pt.player_id,\n",
+        "    MAX(pt.full_name) AS player_name,\n",
+        "    MAX(pt.position) AS position,\n",
+        "    SUM(pt.points_as_starter) AS total_points,\n",
+        "    MIN(pt.first_season) AS first_season,\n",
+        "    MAX(pt.last_season) AS last_season\n",
+        "  FROM workspace.sleeper_core.agg_player_roster_totals pt\n",
+        "  LEFT JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
+        "    ON pt.league_id = mr.league_id\n",
+        "    AND pt.roster_id = mr.roster_id\n",
+        "  WHERE mr.cluster_key = 'league_of_inches'\n",
+        "  GROUP BY mr.manager_display_name, mr.cluster_key, pt.player_id\n",
+        "),\n",
+        "with_games AS (\n",
+        "  SELECT\n",
+        "    pc.*,\n",
+        "    COALESCE(gs.games_started, 0) AS games_started\n",
+        "  FROM player_career_by_manager pc\n",
+        "  LEFT JOIN player_games_started gs\n",
+        "    ON pc.manager_display_name = gs.manager_display_name\n",
+        "    AND pc.cluster_key = gs.cluster_key\n",
+        "    AND pc.player_id = gs.player_id\n",
+        "),\n",
+        "ranked AS (\n",
+        "  SELECT\n",
+        "    *,\n",
+        "    ROW_NUMBER() OVER (PARTITION BY manager_display_name ORDER BY total_points DESC) AS rank\n",
+        "  FROM with_games\n",
+        ")\n",
+        "SELECT\n",
+        "  manager_display_name,\n",
+        "  rank,\n",
+        "  player_name,\n",
+        "  position,\n",
+        "  ROUND(total_points, 1) AS points_when_started,\n",
+        "  games_started,\n",
+        "  ROUND(total_points / NULLIF(games_started, 0), 2) AS ppg_when_started,\n",
+        "  first_season,\n",
+        "  last_season\n",
+        "FROM ranked\n",
+        "WHERE rank <= 10\n",
+        "ORDER BY manager_display_name, rank;"
+      ]
+    },
+    {
+      "name": "4428e5ef",
+      "displayName": "Start/Sit Performance (League-Wide)",
+      "queryLines": [
+        "WITH player_splits AS (\n",
+        "  SELECT\n",
+        "    pw.player_id,\n",
+        "    p.full_name,\n",
+        "    p.position,\n",
+        "    COUNT(CASE WHEN pw.was_started THEN 1 END) AS games_started,\n",
+        "    COALESCE(AVG(CASE WHEN pw.was_started THEN pw.points END), 0) AS ppg_started,\n",
+        "    COUNT(CASE WHEN NOT pw.was_started THEN 1 END) AS games_benched,\n",
+        "    COALESCE(AVG(CASE WHEN NOT pw.was_started THEN pw.points END), 0) AS ppg_benched\n",
+        "  FROM workspace.sleeper_core.fact_player_week pw\n",
+        "  LEFT JOIN workspace.sleeper_core.dim_players p ON pw.player_id = p.player_id\n",
+        "  JOIN workspace.sleeper_core.fact_player_week_enriched pwe\n",
+        "    ON pw.league_id = pwe.league_id\n",
+        "    AND pw.season = pwe.season\n",
+        "    AND pw.week = pwe.week\n",
+        "    AND pw.player_id = pwe.player_id\n",
+        "  WHERE pwe.cluster_key = 'league_of_inches'\n",
+        "  GROUP BY pw.player_id, p.full_name, p.position\n",
+        "  HAVING COUNT(*) >= 10\n",
+        ")\n",
+        "SELECT\n",
+        "  full_name,\n",
+        "  position,\n",
+        "  games_started,\n",
+        "  ROUND(ppg_started, 2) AS ppg_started,\n",
+        "  games_benched,\n",
+        "  ROUND(ppg_benched, 2) AS ppg_benched,\n",
+        "  ROUND(ppg_benched - ppg_started, 2) AS bench_advantage,\n",
+        "  games_started + games_benched AS total_games\n",
+        "FROM player_splits\n",
+        "WHERE games_benched >= 5 AND games_started >= 5\n",
+        "ORDER BY bench_advantage DESC;"
+      ]
+    },
+    {
+      "name": "8bacf339",
+      "displayName": "Best Draft Picks (League-Wide)",
+      "queryLines": [
+        "WITH draft_picks AS (\n",
+        "  SELECT\n",
+        "    dr.season,\n",
+        "    CAST(dp.round AS INT) AS round,\n",
+        "    dp.pick_no,\n",
+        "    dp.roster_id,\n",
+        "    dp.player_id,\n",
+        "    lower(regexp_replace(coalesce(li.name,'unknown'), '[^a-zA-Z0-9]+', '_')) AS cluster_key\n",
+        "  FROM workspace.sleeper_raw.sleeper_draft_picks_snapshot dp\n",
+        "  JOIN workspace.sleeper_raw.sleeper_drafts_snapshot dr ON dp.draft_id = dr.draft_id\n",
+        "  JOIN workspace.sleeper_raw.sleeper_league_info_snapshot li ON dr.league_id = li.league_id\n",
+        "  WHERE dp.player_id IS NOT NULL\n",
+        "),\n",
+        "career_points AS (\n",
+        "  SELECT\n",
+        "    p.cluster_key,\n",
+        "    p.season AS draft_season,\n",
+        "    p.round,\n",
+        "    p.pick_no,\n",
+        "    p.roster_id,\n",
+        "    p.player_id,\n",
+        "    pl.full_name,\n",
+        "    pl.position,\n",
+        "    COALESCE(SUM(pw.points), 0) AS total_career_points,\n",
+        "    COUNT(DISTINCT pw.season) AS seasons_played,\n",
+        "    COUNT(*) AS games_played\n",
+        "  FROM draft_picks p\n",
+        "  LEFT JOIN workspace.sleeper_core.dim_players pl ON p.player_id = pl.player_id\n",
+        "  LEFT JOIN workspace.sleeper_core.fact_player_week_enriched pw\n",
+        "    ON p.cluster_key = pw.cluster_key\n",
+        "    AND p.player_id = pw.player_id\n",
+        "    AND CAST(pw.season AS INT) >= CAST(p.season AS INT)\n",
+        "  GROUP BY p.cluster_key, p.season, p.round, p.pick_no, p.roster_id, p.player_id, pl.full_name, pl.position\n",
+        ")\n",
+        "SELECT\n",
+        "  cp.*,\n",
+        "  mr.manager_display_name AS drafted_by,\n",
+        "  CONCAT(draft_season, ' Round ', round, ' Pick ', pick_no) AS pick_description\n",
+        "FROM career_points cp\n",
+        "LEFT JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
+        "  ON cp.roster_id = mr.roster_id\n",
+        "  AND cp.cluster_key = mr.cluster_key\n",
+        "  AND cp.draft_season = mr.season\n",
+        "WHERE cp.cluster_key = 'league_of_inches'\n",
+        "  AND cp.games_played > 0\n",
+        "ORDER BY total_career_points DESC\n",
+        "LIMIT 50;"
+      ]
+    },
+    {
+      "name": "636a7375",
+      "displayName": "Worst Draft Picks (Busts)",
+      "queryLines": [
+        "WITH draft_picks AS (\n",
+        "  SELECT\n",
+        "    dr.season,\n",
+        "    CAST(dp.round AS INT) AS round,\n",
+        "    dp.pick_no,\n",
+        "    dp.roster_id,\n",
+        "    dp.player_id,\n",
+        "    lower(regexp_replace(coalesce(li.name,'unknown'), '[^a-zA-Z0-9]+', '_')) AS cluster_key\n",
+        "  FROM workspace.sleeper_raw.sleeper_draft_picks_snapshot dp\n",
+        "  JOIN workspace.sleeper_raw.sleeper_drafts_snapshot dr ON dp.draft_id = dr.draft_id\n",
+        "  JOIN workspace.sleeper_raw.sleeper_league_info_snapshot li ON dr.league_id = li.league_id\n",
+        "  WHERE dp.player_id IS NOT NULL\n",
+        "),\n",
+        "career_points AS (\n",
+        "  SELECT\n",
+        "    p.cluster_key,\n",
+        "    p.season AS draft_season,\n",
+        "    p.round,\n",
+        "    p.pick_no,\n",
+        "    p.roster_id,\n",
+        "    p.player_id,\n",
+        "    pl.full_name,\n",
+        "    pl.position,\n",
+        "    COALESCE(SUM(pw.points), 0) AS total_career_points,\n",
+        "    COUNT(DISTINCT pw.season) AS seasons_played,\n",
+        "    COUNT(*) AS games_played\n",
+        "  FROM draft_picks p\n",
+        "  LEFT JOIN workspace.sleeper_core.dim_players pl ON p.player_id = pl.player_id\n",
+        "  LEFT JOIN workspace.sleeper_core.fact_player_week_enriched pw\n",
+        "    ON p.cluster_key = pw.cluster_key\n",
+        "    AND p.player_id = pw.player_id\n",
+        "    AND CAST(pw.season AS INT) >= CAST(p.season AS INT)\n",
+        "  GROUP BY p.cluster_key, p.season, p.round, p.pick_no, p.roster_id, p.player_id, pl.full_name, pl.position\n",
+        ")\n",
+        "SELECT\n",
+        "  cp.*,\n",
+        "  mr.manager_display_name AS drafted_by,\n",
+        "  CONCAT(draft_season, ' Round ', round, ' Pick ', pick_no) AS pick_description\n",
+        "FROM career_points cp\n",
+        "LEFT JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
+        "  ON cp.roster_id = mr.roster_id\n",
+        "  AND cp.cluster_key = mr.cluster_key\n",
+        "  AND cp.draft_season = mr.season\n",
+        "WHERE cp.cluster_key = 'league_of_inches'\n",
+        "ORDER BY total_career_points ASC, round ASC\n",
+        "LIMIT 50;"
+      ]
+    },
+    {
+      "name": "d9586548",
+      "displayName": "Roster Tenure by Manager",
+      "queryLines": [
+        "WITH current_season AS (\n",
+        "  SELECT MAX(season) AS max_season\n",
+        "  FROM workspace.sleeper_raw.sleeper_league_info_snapshot\n",
+        "  WHERE lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_')) = 'league_of_inches'\n",
+        "),\n",
+        "current_rosters AS (\n",
+        "  SELECT DISTINCT\n",
+        "    mr.manager_display_name,\n",
+        "    mr.cluster_key,\n",
+        "    explode(r.players) AS player_id\n",
+        "  FROM workspace.sleeper_raw.sleeper_rosters_snapshot r\n",
+        "  JOIN workspace.sleeper_raw.sleeper_league_info_snapshot li ON r.league_id = li.league_id\n",
+        "  JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
+        "    ON r.league_id = mr.league_id\n",
+        "    AND r.roster_id = mr.roster_id\n",
+        "    AND li.season = mr.season\n",
+        "  CROSS JOIN current_season cs\n",
+        "  WHERE lower(regexp_replace(coalesce(li.name, 'unknown'), '[^a-zA-Z0-9]+', '_')) = 'league_of_inches'\n",
+        "    AND li.season = cs.max_season\n",
+        "),\n",
+        "manager_ownership_history AS (\n",
+        "  SELECT DISTINCT\n",
+        "    mr.manager_display_name,\n",
+        "    mr.cluster_key,\n",
+        "    po.player_id,\n",
+        "    po.ownership_id,\n",
+        "    po.season,\n",
+        "    po.departed_via\n",
+        "  FROM workspace.sleeper_core.dim_player_ownership po\n",
+        "  JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
+        "    ON po.league_id = mr.league_id\n",
+        "    AND po.roster_id = mr.roster_id\n",
+        "    AND po.season = mr.season\n",
+        "  WHERE mr.cluster_key = 'league_of_inches'\n",
+        "),\n",
+        "player_tenure AS (\n",
+        "  SELECT\n",
+        "    cr.manager_display_name,\n",
+        "    cr.player_id,\n",
+        "    MIN(moh.season) AS first_acquired_season,\n",
+        "    COUNT(DISTINCT moh.ownership_id) AS times_acquired,\n",
+        "    COUNT(DISTINCT CASE WHEN moh.departed_via IS NOT NULL THEN moh.ownership_id END) AS times_dropped\n",
+        "  FROM current_rosters cr\n",
+        "  LEFT JOIN manager_ownership_history moh\n",
+        "    ON cr.player_id = moh.player_id\n",
+        "    AND cr.manager_display_name = moh.manager_display_name\n",
+        "    AND cr.cluster_key = moh.cluster_key\n",
+        "  GROUP BY cr.manager_display_name, cr.player_id\n",
+        "),\n",
+        "roster_summary AS (\n",
+        "  SELECT\n",
+        "    pt.manager_display_name,\n",
+        "    COUNT(DISTINCT pt.player_id) AS total_players,\n",
+        "    AVG(CAST((SELECT max_season FROM current_season) AS INT) - CAST(pt.first_acquired_season AS INT)) AS avg_seasons_on_roster,\n",
+        "    COUNT(CASE WHEN times_acquired > 1 AND times_dropped > 0 THEN 1 END) AS players_reacquired\n",
+        "  FROM player_tenure pt\n",
+        "  GROUP BY pt.manager_display_name\n",
+        ")\n",
+        "SELECT\n",
+        "  rs.manager_display_name,\n",
+        "  rs.total_players,\n",
+        "  ROUND(rs.avg_seasons_on_roster, 2) AS avg_seasons_tenure,\n",
+        "  rs.players_reacquired AS boomerang_players,\n",
+        "  ROUND(rs.players_reacquired * 100.0 / rs.total_players, 1) AS pct_boomerang\n",
+        "FROM roster_summary rs\n",
+        "ORDER BY avg_seasons_tenure DESC;"
+      ]
+    },
+    {
+      "name": "708020d2",
+      "displayName": "Most Rostered Players",
+      "queryLines": [
+        "WITH player_rosters AS (\n",
+        "  SELECT\n",
+        "    po.player_id,\n",
+        "    p.full_name,\n",
+        "    p.position,\n",
+        "    COUNT(DISTINCT po.roster_id) AS unique_rosters,\n",
+        "    COUNT(DISTINCT po.ownership_id) AS total_acquisitions,\n",
+        "    MIN(po.season) AS first_season,\n",
+        "    MAX(po.season) AS last_season,\n",
+        "    COLLECT_SET(mr.manager_display_name) AS managers\n",
+        "  FROM workspace.sleeper_core.dim_player_ownership po\n",
+        "  LEFT JOIN workspace.sleeper_core.dim_players p ON po.player_id = p.player_id\n",
+        "  LEFT JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
+        "    ON po.league_id = mr.league_id\n",
+        "    AND po.season = mr.season\n",
+        "    AND po.roster_id = mr.roster_id\n",
+        "  JOIN workspace.sleeper_raw.sleeper_league_info_snapshot li ON po.league_id = li.league_id\n",
+        "  WHERE lower(regexp_replace(coalesce(li.name, 'unknown'), '[^a-zA-Z0-9]+', '_')) = 'league_of_inches'\n",
+        "  GROUP BY po.player_id, p.full_name, p.position\n",
+        ")\n",
+        "SELECT\n",
+        "  full_name,\n",
+        "  position,\n",
+        "  unique_rosters,\n",
+        "  total_acquisitions,\n",
+        "  first_season,\n",
+        "  last_season,\n",
+        "  ROUND(total_acquisitions * 1.0 / unique_rosters, 2) AS avg_acquisitions_per_roster,\n",
+        "  CONCAT_WS(', ', managers) AS owned_by\n",
+        "FROM player_rosters\n",
+        "WHERE unique_rosters > 1\n",
+        "ORDER BY unique_rosters DESC, total_acquisitions DESC\n",
+        "LIMIT 50;"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "b0b3d7c1",
+      "displayName": "Trade Analysis",
+      "layout": [
+        {
+          "widget": {
+            "name": "9ab28149",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "d87ca0ef",
+                  "fields": [
+                    {
+                      "name": "trade_season",
+                      "expression": "`trade_season`"
+                    },
+                    {
+                      "name": "winner_manager",
+                      "expression": "`winner_manager`"
+                    },
+                    {
+                      "name": "loser_manager",
+                      "expression": "`loser_manager`"
+                    },
+                    {
+                      "name": "trade_impact_magnitude",
+                      "expression": "`trade_impact_magnitude`"
+                    },
+                    {
+                      "name": "transaction_id",
+                      "expression": "`transaction_id`"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`is_top_10` IN (TRUE)"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "trade_impact_magnitude",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "Points Delta"
+                  },
+                  "displayName": "Points Delta"
+                },
+                "y": {
+                  "fieldName": "transaction_id",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "axis": {
+                    "hideTitle": true,
+                    "hideLabels": true
+                  },
+                  "displayName": "Managers"
+                },
+                "color": {
+                  "fieldName": "trade_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Trade Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "winner_manager",
+                    "displayName": "Winner"
+                  },
+                  {
+                    "fieldName": "loser_manager",
+                    "displayName": "Loser"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top 10 Worst Trades by Total Points"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "e8417fe5",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f10c9df0",
+                  "fields": [
+                    {
+                      "name": "total_point_differential",
+                      "expression": "`total_point_differential`"
+                    },
+                    {
+                      "name": "manager_name",
+                      "expression": "`manager_name`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "total_point_differential",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Points Delta"
+                },
+                "y": {
+                  "fieldName": "manager_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Manager"
+                },
+                "color": {
+                  "fieldName": "total_point_differential",
+                  "scale": {
+                    "type": "quantitative",
+                    "colorRamp": {
+                      "mode": "custom-diverging",
+                      "colors": {
+                        "start": "#FF0000",
+                        "mid": "#FFFF00",
+                        "end": "#008000"
+                      }
+                    }
+                  },
+                  "legend": {
+                    "hide": true
+                  }
+                }
+              },
+              "frame": {
+                "title": "Total Points Impact from Trading",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 24,
+            "width": 3,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "efd2fbbe",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "d87ca0ef",
+                  "fields": [
+                    {
+                      "name": "transaction_id",
+                      "expression": "`transaction_id`"
+                    },
+                    {
+                      "name": "trade_season",
+                      "expression": "`trade_season`"
+                    },
+                    {
+                      "name": "roster_a_manager",
+                      "expression": "`roster_a_manager`"
+                    },
+                    {
+                      "name": "roster_a_points",
+                      "expression": "`roster_a_points`"
+                    },
+                    {
+                      "name": "roster_b_manager",
+                      "expression": "`roster_b_manager`"
+                    },
+                    {
+                      "name": "roster_b_points",
+                      "expression": "`roster_b_points`"
+                    },
+                    {
+                      "name": "trade_impact_magnitude",
+                      "expression": "`trade_impact_magnitude`"
+                    },
+                    {
+                      "name": "point_differential",
+                      "expression": "`point_differential`"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`is_top_10` IN (TRUE)"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "transaction_id",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "transaction_id",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "trade_season",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 1,
+                    "title": "trade_season",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "roster_a_manager",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 2,
+                    "title": "Roster A",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "cellFormat": {
+                      "default": {
+                        "foregroundColor": {
+                          "themeColorType": "visualizationColors",
+                          "position": 3
+                        }
+                      },
+                      "rules": [
+                        {
+                          "if": {
+                            "column": "point_differential",
+                            "fn": "<",
+                            "literal": "0"
+                          },
+                          "value": {
+                            "foregroundColor": {
+                              "themeColorType": "visualizationColors",
+                              "position": 4
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "roster_a_points",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "Roster A Points",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "roster_b_manager",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 4,
+                    "title": "Roster B",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "cellFormat": {
+                      "default": {
+                        "foregroundColor": {
+                          "themeColorType": "visualizationColors",
+                          "position": 4
+                        }
+                      },
+                      "rules": [
+                        {
+                          "if": {
+                            "column": "point_differential",
+                            "fn": "<",
+                            "literal": "0"
+                          },
+                          "value": {
+                            "foregroundColor": {
+                              "themeColorType": "visualizationColors",
+                              "position": 3
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "roster_b_points",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "Roster B Points",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "trade_impact_magnitude",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 9,
+                    "title": "Points Delta",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  }
+                ]
+              },
+              "invisibleColumns": [
+                {
+                  "numberFormat": "0.00",
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "point_differential",
+                  "type": "float",
+                  "displayAs": "number",
+                  "order": 6,
+                  "title": "point_differential",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "winner_manager",
+                  "type": "string",
+                  "displayAs": "string",
+                  "order": 7,
+                  "title": "winner_manager",
+                  "allowSearch": false,
+                  "alignContent": "left",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "loser_manager",
+                  "type": "string",
+                  "displayAs": "string",
+                  "order": 8,
+                  "title": "loser_manager",
+                  "allowSearch": false,
+                  "alignContent": "left",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "trade_is_complete",
+                  "type": "boolean",
+                  "displayAs": "boolean",
+                  "order": 10,
+                  "title": "trade_is_complete",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "managers",
+                  "type": "string",
+                  "displayAs": "string",
+                  "order": 11,
+                  "title": "managers",
+                  "allowSearch": false,
+                  "alignContent": "left",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "is_top_10",
+                  "type": "boolean",
+                  "displayAs": "boolean",
+                  "order": 12,
+                  "title": "is_top_10",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "is_bottom_10",
+                  "type": "boolean",
+                  "displayAs": "boolean",
+                  "order": 100013,
+                  "title": "is_bottom_10",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                }
+              ],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": false,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Top 10 Worst Trades by Delta"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "fcd6631c",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "d87ca0ef",
+                  "fields": [
+                    {
+                      "name": "trade_season",
+                      "expression": "`trade_season`"
+                    },
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    },
+                    {
+                      "name": "managers",
+                      "expression": "`managers`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "count(*)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Impact Magnitude"
+                },
+                "y": {
+                  "fieldName": "managers",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Managers"
+                },
+                "color": {
+                  "fieldName": "trade_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Trade Season"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Trades by Pair"
+              },
+              "mark": {
+                "layout": "stack"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 24,
+            "width": 3,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "bcd7c982",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f10c9df0",
+                  "fields": [
+                    {
+                      "name": "manager_name",
+                      "expression": "`manager_name`"
+                    },
+                    {
+                      "name": "total_trades",
+                      "expression": "`total_trades`"
+                    },
+                    {
+                      "name": "wins",
+                      "expression": "`wins`"
+                    },
+                    {
+                      "name": "losses",
+                      "expression": "`losses`"
+                    },
+                    {
+                      "name": "win_pct",
+                      "expression": "`win_pct`"
+                    },
+                    {
+                      "name": "best_trade_magnitude",
+                      "expression": "`best_trade_magnitude`"
+                    },
+                    {
+                      "name": "worst_trade_magnitude",
+                      "expression": "`worst_trade_magnitude`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "manager_name",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "Manager",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "total_trades",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "Total Trades",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "wins",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "Ws",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "losses",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "Ls",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "win_pct",
+                    "numberFormat": "00%",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "decimal",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100005,
+                    "title": "Win%",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "cellFormat": {
+                      "default": {
+                        "foregroundColor": {
+                          "themeColorType": "visualizationColors",
+                          "position": 4
+                        }
+                      },
+                      "rules": [
+                        {
+                          "if": {
+                            "column": "win_pct",
+                            "fn": ">=",
+                            "literal": "50"
+                          },
+                          "value": {
+                            "foregroundColor": {
+                              "themeColorType": "visualizationColors",
+                              "position": 3
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "best_trade_magnitude",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100008,
+                    "title": "Best Delta",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "cellFormat": {
+                      "default": {
+                        "foregroundColor": {
+                          "themeColorType": "visualizationColors",
+                          "position": 3
+                        }
+                      },
+                      "rules": []
+                    }
+                  },
+                  {
+                    "fieldName": "worst_trade_magnitude",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100009,
+                    "title": "Worst Delta",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "cellFormat": {
+                      "default": {
+                        "foregroundColor": {
+                          "themeColorType": "visualizationColors",
+                          "position": 4
+                        }
+                      },
+                      "rules": []
+                    }
+                  }
+                ]
+              },
+              "invisibleColumns": [
+                {
+                  "numberFormat": "0",
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "ties",
+                  "type": "integer",
+                  "displayAs": "number",
+                  "order": 100004,
+                  "title": "ties",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "numberFormat": "0.00",
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "total_point_differential",
+                  "type": "float",
+                  "displayAs": "number",
+                  "order": 100006,
+                  "title": "total_point_differential",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "numberFormat": "0.00",
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "avg_point_differential",
+                  "type": "float",
+                  "displayAs": "number",
+                  "order": 100007,
+                  "title": "avg_point_differential",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                }
+              ],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": false,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Win % by Manager"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 33,
+            "width": 6,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "250ec0d7",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "b1d1ec51",
+                  "fields": [
+                    {
+                      "name": "asset_name",
+                      "expression": "`asset_name`"
+                    },
+                    {
+                      "name": "manager_received",
+                      "expression": "`manager_received`"
+                    },
+                    {
+                      "name": "sum(career_points_given_away)",
+                      "expression": "SUM(`career_points_given_away`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "manager_received",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "Manager"
+                },
+                "y": {
+                  "fieldName": "sum(career_points_given_away)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Points"
+                },
+                "color": {
+                  "fieldName": "asset_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Asset"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Trade Breakdown"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 43,
+            "width": 6,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "04a1a964",
+            "queries": [
+              {
+                "name": "dashboards/01f0afac390a11eba7ba395b06f6038d/datasets/01f0afb20a0212ff8fd9b03cf74d5254_lookup_key",
+                "query": {
+                  "datasetName": "b1d1ec51",
+                  "fields": [
+                    {
+                      "name": "lookup_key",
+                      "expression": "`lookup_key`"
+                    },
+                    {
+                      "name": "lookup_key_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "lookup_key",
+                    "queryName": "dashboards/01f0afac390a11eba7ba395b06f6038d/datasets/01f0afb20a0212ff8fd9b03cf74d5254_lookup_key"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Transaction ID"
+              },
+              "disallowAll": true
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 42,
+            "width": 3,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "7bd3cdd1",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "d87ca0ef",
+                  "fields": [
+                    {
+                      "name": "transaction_id",
+                      "expression": "`transaction_id`"
+                    },
+                    {
+                      "name": "trade_season",
+                      "expression": "`trade_season`"
+                    },
+                    {
+                      "name": "roster_a_manager",
+                      "expression": "`roster_a_manager`"
+                    },
+                    {
+                      "name": "roster_a_points",
+                      "expression": "`roster_a_points`"
+                    },
+                    {
+                      "name": "roster_b_manager",
+                      "expression": "`roster_b_manager`"
+                    },
+                    {
+                      "name": "roster_b_points",
+                      "expression": "`roster_b_points`"
+                    },
+                    {
+                      "name": "trade_impact_magnitude",
+                      "expression": "`trade_impact_magnitude`"
+                    },
+                    {
+                      "name": "point_differential",
+                      "expression": "`point_differential`"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`is_bottom_10` IN (TRUE)"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "transaction_id",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "transaction_id",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "trade_season",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 1,
+                    "title": "trade_season",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "roster_a_manager",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 2,
+                    "title": "Roster A",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "cellFormat": {
+                      "default": {
+                        "foregroundColor": {
+                          "themeColorType": "visualizationColors",
+                          "position": 3
+                        }
+                      },
+                      "rules": [
+                        {
+                          "if": {
+                            "column": "point_differential",
+                            "fn": "<",
+                            "literal": "0"
+                          },
+                          "value": {
+                            "foregroundColor": {
+                              "themeColorType": "visualizationColors",
+                              "position": 4
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "roster_a_points",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "Roster A Points",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "roster_b_manager",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 4,
+                    "title": "Roster B",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "cellFormat": {
+                      "default": {
+                        "foregroundColor": {
+                          "themeColorType": "visualizationColors",
+                          "position": 4
+                        }
+                      },
+                      "rules": [
+                        {
+                          "if": {
+                            "column": "point_differential",
+                            "fn": "<",
+                            "literal": "0"
+                          },
+                          "value": {
+                            "foregroundColor": {
+                              "themeColorType": "visualizationColors",
+                              "position": 3
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "roster_b_points",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "Roster B Points",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "trade_impact_magnitude",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 9,
+                    "title": "Points Delta",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  }
+                ]
+              },
+              "invisibleColumns": [
+                {
+                  "numberFormat": "0.00",
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "point_differential",
+                  "type": "float",
+                  "displayAs": "number",
+                  "order": 6,
+                  "title": "point_differential",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "winner_manager",
+                  "type": "string",
+                  "displayAs": "string",
+                  "order": 7,
+                  "title": "winner_manager",
+                  "allowSearch": false,
+                  "alignContent": "left",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "loser_manager",
+                  "type": "string",
+                  "displayAs": "string",
+                  "order": 8,
+                  "title": "loser_manager",
+                  "allowSearch": false,
+                  "alignContent": "left",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "trade_is_complete",
+                  "type": "boolean",
+                  "displayAs": "boolean",
+                  "order": 10,
+                  "title": "trade_is_complete",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "managers",
+                  "type": "string",
+                  "displayAs": "string",
+                  "order": 11,
+                  "title": "managers",
+                  "allowSearch": false,
+                  "alignContent": "left",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "is_top_10",
+                  "type": "boolean",
+                  "displayAs": "boolean",
+                  "order": 12,
+                  "title": "is_top_10",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                },
+                {
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "is_bottom_10",
+                  "type": "boolean",
+                  "displayAs": "boolean",
+                  "order": 100013,
+                  "title": "is_bottom_10",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                }
+              ],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": false,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Top 10 Most Even Trades by Delta"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 16,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "genieSpace": {
+      "isEnabled": false
+    }
+  }
+}
