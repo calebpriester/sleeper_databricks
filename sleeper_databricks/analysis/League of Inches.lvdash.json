@@ -327,65 +327,46 @@
     },
     {
       "name": "8bacf339",
-      "displayName": "Best Draft Picks (League-Wide)",
+      "displayName": "Draft Pick Analysis (League-Wide)",
       "queryLines": [
         "WITH league_season_bounds AS (\n",
         "  SELECT\n",
-        "    lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_')) AS cluster_key,\n",
-        "    MIN(season) AS first_season,\n",
-        "    MAX(season) AS current_season\n",
-        "  FROM workspace.sleeper_raw.sleeper_league_info_snapshot\n",
-        "  GROUP BY lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_'))\n",
-        "),\n",
-        "draft_picks AS (\n",
-        "  SELECT\n",
-        "    dr.season,\n",
-        "    CAST(dp.round AS INT) AS round,\n",
-        "    dp.pick_no,\n",
-        "    dp.roster_id,\n",
-        "    dp.player_id,\n",
-        "    lower(regexp_replace(coalesce(li.name,'unknown'), '[^a-zA-Z0-9]+', '_')) AS cluster_key\n",
-        "  FROM workspace.sleeper_raw.sleeper_draft_picks_snapshot dp\n",
-        "  JOIN workspace.sleeper_raw.sleeper_drafts_snapshot dr ON dp.draft_id = dr.draft_id\n",
-        "  JOIN workspace.sleeper_raw.sleeper_league_info_snapshot li ON dr.league_id = li.league_id\n",
-        "  WHERE dp.player_id IS NOT NULL\n",
+        "    cluster_key,\n",
+        "    CAST(season_start AS INT) AS first_season,\n",
+        "    CAST(season_end AS INT) AS last_season\n",
+        "  FROM workspace.sleeper_core.dim_league_clusters\n",
         "),\n",
         "career_points AS (\n",
         "  SELECT\n",
-        "    p.cluster_key,\n",
-        "    p.season AS draft_season,\n",
-        "    p.round,\n",
-        "    p.pick_no,\n",
-        "    p.roster_id,\n",
-        "    p.player_id,\n",
+        "    dp.cluster_key,\n",
+        "    dp.season AS draft_season,\n",
+        "    dp.round,\n",
+        "    dp.pick_no,\n",
+        "    dp.roster_id,\n",
+        "    dp.player_id,\n",
+        "    dp.manager_display_name,\n",
         "    pl.full_name,\n",
         "    pl.position,\n",
-        "    lsb.first_season,\n",
-        "    lsb.current_season,\n",
-        "    COALESCE(SUM(pw.points), 0) AS total_career_points,\n",
-        "    COUNT(DISTINCT pw.season) AS seasons_played,\n",
-        "    COUNT(*) AS games_played,\n",
-        "    COUNT(DISTINCT CASE\n",
-        "      WHEN CAST(pw.season AS INT) < CAST(lsb.current_season AS INT)\n",
-        "      AND CAST(pw.season AS INT) > CAST(lsb.first_season AS INT)\n",
-        "      THEN pw.season\n",
-        "    END) AS completed_seasons,\n",
-        "    COALESCE(SUM(CASE\n",
-        "      WHEN CAST(pw.season AS INT) < CAST(lsb.current_season AS INT)\n",
-        "      AND CAST(pw.season AS INT) > CAST(lsb.first_season AS INT)\n",
-        "      THEN pw.points\n",
-        "      ELSE 0\n",
-        "    END), 0) AS completed_season_points\n",
-        "  FROM draft_picks p\n",
-        "  LEFT JOIN workspace.sleeper_core.dim_players pl ON p.player_id = pl.player_id\n",
+        "    COALESCE(SUM(CASE WHEN CAST(pw.season AS INT) < lsb.last_season THEN pw.points ELSE 0 END), 0) AS total_career_points,\n",
+        "    COUNT(DISTINCT CASE WHEN CAST(pw.season AS INT) < lsb.last_season THEN pw.season END) AS seasons_played,\n",
+        "    COUNT(CASE WHEN CAST(pw.season AS INT) < lsb.last_season THEN 1 END) AS games_played,\n",
+        "    COALESCE(SUM(CASE WHEN CAST(pw.season AS INT) < lsb.last_season AND pw.was_started = TRUE THEN pw.points ELSE 0 END), 0) AS points_as_starter\n",
+        "  FROM workspace.sleeper_core.dim_draft_picks dp\n",
+        "  LEFT JOIN workspace.sleeper_core.dim_players pl \n",
+        "    ON dp.player_id = pl.player_id\n",
         "  LEFT JOIN workspace.sleeper_core.fact_player_week_enriched pw\n",
-        "    ON p.cluster_key = pw.cluster_key\n",
-        "    AND p.player_id = pw.player_id\n",
-        "    AND CAST(pw.season AS INT) >= CAST(p.season AS INT)\n",
-        "  LEFT JOIN league_season_bounds lsb ON p.cluster_key = lsb.cluster_key\n",
-        "  GROUP BY\n",
-        "    p.cluster_key, p.season, p.round, p.pick_no, p.roster_id, p.player_id, pl.full_name, pl.position,\n",
-        "    lsb.first_season, lsb.current_season\n",
+        "    ON dp.cluster_key = pw.cluster_key\n",
+        "    AND dp.player_id = pw.player_id\n",
+        "    AND CAST(pw.season AS INT) >= CAST(dp.season AS INT)\n",
+        "  LEFT JOIN league_season_bounds lsb\n",
+        "    ON dp.cluster_key = lsb.cluster_key\n",
+        "  WHERE CAST(dp.season AS INT) > lsb.first_season\n",
+        "    AND CAST(dp.season AS INT) < lsb.last_season\n",
+        "    AND (\n",
+        "      (:show_worst = 'TRUE' AND dp.round IN (1,2))\n",
+        "      OR (:show_worst != 'TRUE')\n",
+        "    )\n",
+        "  GROUP BY dp.cluster_key, dp.season, dp.round, dp.pick_no, dp.roster_id, dp.player_id, dp.manager_display_name, pl.full_name, pl.position\n",
         ")\n",
         "SELECT\n",
         "  cp.cluster_key,\n",
@@ -396,110 +377,85 @@
         "  cp.player_id,\n",
         "  cp.full_name,\n",
         "  cp.position,\n",
-        "  cp.total_career_points,\n",
-        "  ROUND(cp.completed_season_points / NULLIF(cp.completed_seasons, 0), 1) AS points_per_season,\n",
+        "  ROUND(cp.total_career_points, 1) AS total_career_points,\n",
+        "  ROUND(cp.points_as_starter, 1) AS points_as_starter,\n",
         "  cp.seasons_played,\n",
-        "  cp.completed_seasons,\n",
         "  cp.games_played,\n",
-        "  mr.manager_display_name AS drafted_by,\n",
+        "  ROUND(cp.total_career_points / NULLIF(cp.seasons_played, 0), 1) AS points_per_season,\n",
+        "  cp.manager_display_name AS drafted_by,\n",
         "  CONCAT(draft_season, ' Round ', round, ' Pick ', pick_no) AS pick_description\n",
         "FROM career_points cp\n",
-        "LEFT JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
-        "  ON cp.roster_id = mr.roster_id\n",
-        "  AND cp.cluster_key = mr.cluster_key\n",
-        "  AND cp.draft_season = mr.season\n",
         "WHERE cp.cluster_key = 'league_of_inches'\n",
         "  AND cp.games_played > 0\n",
-        "ORDER BY total_career_points DESC\n",
-        "LIMIT 50;"
-      ]
-    },
-    {
-      "name": "636a7375",
-      "displayName": "Worst Draft Picks (Busts)",
-      "queryLines": [
-        "WITH league_season_bounds AS (\n",
-        "  SELECT\n",
-        "    lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_')) AS cluster_key,\n",
-        "    MIN(season) AS first_season,\n",
-        "    MAX(season) AS current_season\n",
-        "  FROM workspace.sleeper_raw.sleeper_league_info_snapshot\n",
-        "  GROUP BY lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_'))\n",
-        "),\n",
-        "draft_picks AS (\n",
-        "  SELECT\n",
-        "    dr.season,\n",
-        "    CAST(dp.round AS INT) AS round,\n",
-        "    dp.pick_no,\n",
-        "    dp.roster_id,\n",
-        "    dp.player_id,\n",
-        "    lower(regexp_replace(coalesce(li.name,'unknown'), '[^a-zA-Z0-9]+', '_')) AS cluster_key\n",
-        "  FROM workspace.sleeper_raw.sleeper_draft_picks_snapshot dp\n",
-        "  JOIN workspace.sleeper_raw.sleeper_drafts_snapshot dr ON dp.draft_id = dr.draft_id\n",
-        "  JOIN workspace.sleeper_raw.sleeper_league_info_snapshot li ON dr.league_id = li.league_id\n",
-        "  WHERE dp.player_id IS NOT NULL\n",
-        "),\n",
-        "career_points AS (\n",
-        "  SELECT\n",
-        "    p.cluster_key,\n",
-        "    p.season AS draft_season,\n",
-        "    p.round,\n",
-        "    p.pick_no,\n",
-        "    p.roster_id,\n",
-        "    p.player_id,\n",
-        "    pl.full_name,\n",
-        "    pl.position,\n",
-        "    lsb.first_season,\n",
-        "    lsb.current_season,\n",
-        "    COALESCE(SUM(pw.points), 0) AS total_career_points,\n",
-        "    COUNT(DISTINCT pw.season) AS seasons_played,\n",
-        "    COUNT(*) AS games_played,\n",
-        "    COUNT(DISTINCT CASE\n",
-        "      WHEN CAST(pw.season AS INT) < CAST(lsb.current_season AS INT)\n",
-        "        AND CAST(pw.season AS INT) > CAST(lsb.first_season AS INT)\n",
-        "      THEN pw.season\n",
-        "    END) AS completed_seasons,\n",
-        "    COALESCE(SUM(CASE\n",
-        "      WHEN CAST(pw.season AS INT) < CAST(lsb.current_season AS INT)\n",
-        "        AND CAST(pw.season AS INT) > CAST(lsb.first_season AS INT)\n",
-        "      THEN pw.points\n",
-        "      ELSE 0\n",
-        "    END), 0) AS completed_season_points\n",
-        "  FROM draft_picks p\n",
-        "  LEFT JOIN workspace.sleeper_core.dim_players pl ON p.player_id = pl.player_id\n",
-        "  LEFT JOIN workspace.sleeper_core.fact_player_week_enriched pw\n",
-        "    ON p.cluster_key = pw.cluster_key\n",
-        "    AND p.player_id = pw.player_id\n",
-        "    AND CAST(pw.season AS INT) >= CAST(p.season AS INT)\n",
-        "  LEFT JOIN league_season_bounds lsb ON p.cluster_key = lsb.cluster_key\n",
-        "  GROUP BY\n",
-        "    p.cluster_key, p.season, p.round, p.pick_no, p.roster_id, p.player_id, pl.full_name, pl.position,\n",
-        "    lsb.first_season, lsb.current_season\n",
-        ")\n",
-        "SELECT\n",
-        "  cp.cluster_key,\n",
-        "  cp.draft_season,\n",
-        "  cp.round,\n",
-        "  cp.pick_no,\n",
-        "  cp.roster_id,\n",
-        "  cp.player_id,\n",
-        "  cp.full_name,\n",
-        "  cp.position,\n",
-        "  cp.total_career_points,\n",
-        "  ROUND(cp.completed_season_points / NULLIF(cp.completed_seasons, 0), 1) AS points_per_season,\n",
-        "  cp.seasons_played,\n",
-        "  cp.completed_seasons,\n",
-        "  cp.games_played,\n",
-        "  mr.manager_display_name AS drafted_by,\n",
-        "  CONCAT(draft_season, ' Round ', round, ' Pick ', pick_no) AS pick_description\n",
-        "FROM career_points cp\n",
-        "LEFT JOIN workspace.sleeper_core.dim_manager_roster_map mr\n",
-        "  ON cp.roster_id = mr.roster_id\n",
-        "  AND cp.cluster_key = mr.cluster_key\n",
-        "  AND cp.draft_season = mr.season\n",
-        "WHERE cp.cluster_key = 'league_of_inches'\n",
-        "ORDER BY total_career_points ASC, round ASC\n",
-        "LIMIT 50;"
+        "  AND (:position = 'ALL' OR cp.position = :position)\n",
+        "ORDER BY\n",
+        "  CASE \n",
+        "    WHEN :view_filter = 'points_per_season' THEN ROUND(cp.total_career_points / NULLIF(cp.seasons_played, 0), 1)\n",
+        "    ELSE ROUND(cp.points_as_starter, 1)\n",
+        "  END DESC\n",
+        "LIMIT :top_n;"
+      ],
+      "parameters": [
+        {
+          "displayName": "show_worst",
+          "keyword": "show_worst",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "FALSE"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "top_n",
+          "keyword": "top_n",
+          "dataType": "INTEGER",
+          "defaultSelection": {
+            "values": {
+              "dataType": "INTEGER",
+              "values": [
+                {
+                  "value": "30"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "position",
+          "keyword": "position",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "ALL"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "displayName": "view_filter",
+          "keyword": "view_filter",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "points_per_season"
+                }
+              ]
+            }
+          }
+        }
       ]
     },
     {
@@ -3223,6 +3179,141 @@
                       "expression": "`draft_season`"
                     },
                     {
+                      "name": "drafted_by",
+                      "expression": "`drafted_by`"
+                    },
+                    {
+                      "name": "pick_description",
+                      "expression": "`pick_description`"
+                    },
+                    {
+                      "name": "points_as_starter",
+                      "expression": "`points_as_starter`"
+                    },
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    }
+                  ],
+                  "parameterValues": [
+                    {
+                      "keyword": "top_n",
+                      "selection": {
+                        "values": {
+                          "dataType": "INTEGER",
+                          "values": [
+                            {
+                              "value": "10"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "position",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "QB"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "view_filter",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "points_as_starter"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "points_as_starter",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Points"
+                },
+                "y": {
+                  "fieldName": "full_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Player"
+                },
+                "color": {
+                  "fieldName": "draft_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Draft Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "drafted_by",
+                    "displayName": "Drafted By"
+                  },
+                  {
+                    "fieldName": "pick_description",
+                    "displayName": "Pick"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most Points As Starter - QB"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "aef9f0a5",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8bacf339",
+                  "fields": [
+                    {
+                      "name": "draft_season",
+                      "expression": "`draft_season`"
+                    },
+                    {
+                      "name": "drafted_by",
+                      "expression": "`drafted_by`"
+                    },
+                    {
+                      "name": "pick_description",
+                      "expression": "`pick_description`"
+                    },
+                    {
                       "name": "points_per_season",
                       "expression": "`points_per_season`"
                     },
@@ -3231,9 +3322,45 @@
                       "expression": "`full_name`"
                     }
                   ],
-                  "filters": [
+                  "parameterValues": [
                     {
-                      "expression": "`position` IN ('QB')"
+                      "keyword": "top_n",
+                      "selection": {
+                        "values": {
+                          "dataType": "INTEGER",
+                          "values": [
+                            {
+                              "value": "10"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "position",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "QB"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "view_filter",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "points_per_season"
+                            }
+                          ]
+                        }
+                      }
                     }
                   ],
                   "disaggregated": true
@@ -3248,7 +3375,8 @@
                   "fieldName": "points_per_season",
                   "scale": {
                     "type": "quantitative"
-                  }
+                  },
+                  "displayName": "Points per Season"
                 },
                 "y": {
                   "fieldName": "full_name",
@@ -3257,14 +3385,26 @@
                     "sort": {
                       "by": "x-reversed"
                     }
-                  }
+                  },
+                  "displayName": "Player"
                 },
                 "color": {
                   "fieldName": "draft_season",
                   "scale": {
                     "type": "categorical"
+                  },
+                  "displayName": "Draft Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "drafted_by",
+                    "displayName": "Drafted By"
+                  },
+                  {
+                    "fieldName": "pick_description",
+                    "displayName": "Pick"
                   }
-                }
+                ]
               },
               "frame": {
                 "showTitle": true,
@@ -3275,6 +3415,768 @@
           "position": {
             "x": 0,
             "y": 0,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "98a85721",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8bacf339",
+                  "fields": [
+                    {
+                      "name": "draft_season",
+                      "expression": "`draft_season`"
+                    },
+                    {
+                      "name": "drafted_by",
+                      "expression": "`drafted_by`"
+                    },
+                    {
+                      "name": "pick_description",
+                      "expression": "`pick_description`"
+                    },
+                    {
+                      "name": "points_per_season",
+                      "expression": "`points_per_season`"
+                    },
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    }
+                  ],
+                  "parameterValues": [
+                    {
+                      "keyword": "top_n",
+                      "selection": {
+                        "values": {
+                          "dataType": "INTEGER",
+                          "values": [
+                            {
+                              "value": "10"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "position",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "RB"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "view_filter",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "points_per_season"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "points_per_season",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Points per Season"
+                },
+                "y": {
+                  "fieldName": "full_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Player"
+                },
+                "color": {
+                  "fieldName": "draft_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Draft Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "drafted_by",
+                    "displayName": "Drafted By"
+                  },
+                  {
+                    "fieldName": "pick_description",
+                    "displayName": "Pick"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most Points Per Season - RB"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "fb70e24f",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8bacf339",
+                  "fields": [
+                    {
+                      "name": "draft_season",
+                      "expression": "`draft_season`"
+                    },
+                    {
+                      "name": "drafted_by",
+                      "expression": "`drafted_by`"
+                    },
+                    {
+                      "name": "pick_description",
+                      "expression": "`pick_description`"
+                    },
+                    {
+                      "name": "points_as_starter",
+                      "expression": "`points_as_starter`"
+                    },
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    }
+                  ],
+                  "parameterValues": [
+                    {
+                      "keyword": "top_n",
+                      "selection": {
+                        "values": {
+                          "dataType": "INTEGER",
+                          "values": [
+                            {
+                              "value": "10"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "position",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "RB"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "view_filter",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "points_as_starter"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "points_as_starter",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Points"
+                },
+                "y": {
+                  "fieldName": "full_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Player"
+                },
+                "color": {
+                  "fieldName": "draft_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Draft Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "drafted_by",
+                    "displayName": "Drafted By"
+                  },
+                  {
+                    "fieldName": "pick_description",
+                    "displayName": "Pick"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most Points As Starter - RB"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 8,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "ddbda202",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8bacf339",
+                  "fields": [
+                    {
+                      "name": "draft_season",
+                      "expression": "`draft_season`"
+                    },
+                    {
+                      "name": "drafted_by",
+                      "expression": "`drafted_by`"
+                    },
+                    {
+                      "name": "pick_description",
+                      "expression": "`pick_description`"
+                    },
+                    {
+                      "name": "points_per_season",
+                      "expression": "`points_per_season`"
+                    },
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    }
+                  ],
+                  "parameterValues": [
+                    {
+                      "keyword": "top_n",
+                      "selection": {
+                        "values": {
+                          "dataType": "INTEGER",
+                          "values": [
+                            {
+                              "value": "10"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "position",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "WR"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "view_filter",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "points_per_season"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "points_per_season",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Points per Season"
+                },
+                "y": {
+                  "fieldName": "full_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Player"
+                },
+                "color": {
+                  "fieldName": "draft_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Draft Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "drafted_by",
+                    "displayName": "Drafted By"
+                  },
+                  {
+                    "fieldName": "pick_description",
+                    "displayName": "Pick"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most Points Per Season - WR"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 16,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "79e7e67d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8bacf339",
+                  "fields": [
+                    {
+                      "name": "draft_season",
+                      "expression": "`draft_season`"
+                    },
+                    {
+                      "name": "drafted_by",
+                      "expression": "`drafted_by`"
+                    },
+                    {
+                      "name": "pick_description",
+                      "expression": "`pick_description`"
+                    },
+                    {
+                      "name": "points_as_starter",
+                      "expression": "`points_as_starter`"
+                    },
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    }
+                  ],
+                  "parameterValues": [
+                    {
+                      "keyword": "top_n",
+                      "selection": {
+                        "values": {
+                          "dataType": "INTEGER",
+                          "values": [
+                            {
+                              "value": "10"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "position",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "WR"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "view_filter",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "points_as_starter"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "points_as_starter",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Points"
+                },
+                "y": {
+                  "fieldName": "full_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Player"
+                },
+                "color": {
+                  "fieldName": "draft_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Draft Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "drafted_by",
+                    "displayName": "Drafted By"
+                  },
+                  {
+                    "fieldName": "pick_description",
+                    "displayName": "Pick"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most Points As Starter - WR"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 16,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "a528756a",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8bacf339",
+                  "fields": [
+                    {
+                      "name": "draft_season",
+                      "expression": "`draft_season`"
+                    },
+                    {
+                      "name": "drafted_by",
+                      "expression": "`drafted_by`"
+                    },
+                    {
+                      "name": "pick_description",
+                      "expression": "`pick_description`"
+                    },
+                    {
+                      "name": "points_per_season",
+                      "expression": "`points_per_season`"
+                    },
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    }
+                  ],
+                  "parameterValues": [
+                    {
+                      "keyword": "top_n",
+                      "selection": {
+                        "values": {
+                          "dataType": "INTEGER",
+                          "values": [
+                            {
+                              "value": "10"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "position",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "TE"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "view_filter",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "points_per_season"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "points_per_season",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Points per Season"
+                },
+                "y": {
+                  "fieldName": "full_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Player"
+                },
+                "color": {
+                  "fieldName": "draft_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Draft Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "drafted_by",
+                    "displayName": "Drafted By"
+                  },
+                  {
+                    "fieldName": "pick_description",
+                    "displayName": "Pick"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most Points Per Season - TE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 24,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "4aac2322",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8bacf339",
+                  "fields": [
+                    {
+                      "name": "draft_season",
+                      "expression": "`draft_season`"
+                    },
+                    {
+                      "name": "drafted_by",
+                      "expression": "`drafted_by`"
+                    },
+                    {
+                      "name": "pick_description",
+                      "expression": "`pick_description`"
+                    },
+                    {
+                      "name": "points_as_starter",
+                      "expression": "`points_as_starter`"
+                    },
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    }
+                  ],
+                  "parameterValues": [
+                    {
+                      "keyword": "top_n",
+                      "selection": {
+                        "values": {
+                          "dataType": "INTEGER",
+                          "values": [
+                            {
+                              "value": "10"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "position",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "TE"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "keyword": "view_filter",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "points_as_starter"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "points_as_starter",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Points"
+                },
+                "y": {
+                  "fieldName": "full_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  },
+                  "displayName": "Player"
+                },
+                "color": {
+                  "fieldName": "draft_season",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Draft Season"
+                },
+                "extra": [
+                  {
+                    "fieldName": "drafted_by",
+                    "displayName": "Drafted By"
+                  },
+                  {
+                    "fieldName": "pick_description",
+                    "displayName": "Pick"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most Points As Starter - TE"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 24,
             "width": 3,
             "height": 8
           }
