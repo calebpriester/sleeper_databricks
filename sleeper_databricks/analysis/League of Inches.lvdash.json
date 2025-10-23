@@ -276,7 +276,9 @@
         "    COUNT(CASE WHEN pw.was_started THEN 1 END) AS games_started,\n",
         "    COALESCE(AVG(CASE WHEN pw.was_started THEN pw.points END), 0) AS ppg_started,\n",
         "    COUNT(CASE WHEN NOT pw.was_started THEN 1 END) AS games_benched,\n",
-        "    COALESCE(AVG(CASE WHEN NOT pw.was_started THEN pw.points END), 0) AS ppg_benched\n",
+        "    -- PPG when benched when excluding injuries/byes/etc\n",
+        "    COUNT(CASE WHEN NOT pw.was_started AND pw.points > 0 THEN 1 END) AS games_healthy_benched,\n",
+        "    COALESCE(AVG(CASE WHEN NOT pw.was_started AND pw.points > 0 THEN pw.points END), 0) AS ppg_healthy_benched\n",
         "  FROM workspace.sleeper_core.fact_player_week pw\n",
         "  LEFT JOIN workspace.sleeper_core.dim_players p ON pw.player_id = p.player_id\n",
         "  JOIN workspace.sleeper_core.fact_player_week_enriched pwe\n",
@@ -294,19 +296,48 @@
         "  games_started,\n",
         "  ROUND(ppg_started, 2) AS ppg_started,\n",
         "  games_benched,\n",
-        "  ROUND(ppg_benched, 2) AS ppg_benched,\n",
-        "  ROUND(ppg_benched - ppg_started, 2) AS bench_advantage,\n",
-        "  games_started + games_benched AS total_games\n",
+        "  games_healthy_benched,\n",
+        "  ROUND(ppg_healthy_benched, 2) AS ppg_healthy_benched,\n",
+        "  ROUND(ppg_healthy_benched - ppg_started, 2) AS bench_advantage_with_decision,\n",
+        "  games_started + games_benched AS total_games,\n",
+        "  games_started + games_healthy_benched AS total_decision_games\n",
         "FROM player_splits\n",
-        "WHERE games_benched >= 5 AND games_started >= 5\n",
-        "ORDER BY bench_advantage DESC;"
+        "WHERE games_healthy_benched >= 5 AND games_started >= 5\n",
+        "ORDER BY\n",
+        "  CASE WHEN :the_worst = 'TRUE' THEN bench_advantage_with_decision ELSE -bench_advantage_with_decision END DESC\n",
+        "LIMIT 10;"
+      ],
+      "parameters": [
+        {
+          "displayName": "the_worst",
+          "keyword": "the_worst",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "TRUE"
+                }
+              ]
+            }
+          }
+        }
       ]
     },
     {
       "name": "8bacf339",
       "displayName": "Best Draft Picks (League-Wide)",
       "queryLines": [
-        "WITH draft_picks AS (\n",
+        "WITH league_season_bounds AS (\n",
+        "  SELECT\n",
+        "    lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_')) AS cluster_key,\n",
+        "    MIN(season) AS first_season,\n",
+        "    MAX(season) AS current_season\n",
+        "  FROM workspace.sleeper_raw.sleeper_league_info_snapshot\n",
+        "  GROUP BY lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_'))\n",
+        "),\n",
+        "draft_picks AS (\n",
         "  SELECT\n",
         "    dr.season,\n",
         "    CAST(dp.round AS INT) AS round,\n",
@@ -329,19 +360,47 @@
         "    p.player_id,\n",
         "    pl.full_name,\n",
         "    pl.position,\n",
+        "    lsb.first_season,\n",
+        "    lsb.current_season,\n",
         "    COALESCE(SUM(pw.points), 0) AS total_career_points,\n",
         "    COUNT(DISTINCT pw.season) AS seasons_played,\n",
-        "    COUNT(*) AS games_played\n",
+        "    COUNT(*) AS games_played,\n",
+        "    COUNT(DISTINCT CASE\n",
+        "      WHEN CAST(pw.season AS INT) < CAST(lsb.current_season AS INT)\n",
+        "      AND CAST(pw.season AS INT) > CAST(lsb.first_season AS INT)\n",
+        "      THEN pw.season\n",
+        "    END) AS completed_seasons,\n",
+        "    COALESCE(SUM(CASE\n",
+        "      WHEN CAST(pw.season AS INT) < CAST(lsb.current_season AS INT)\n",
+        "      AND CAST(pw.season AS INT) > CAST(lsb.first_season AS INT)\n",
+        "      THEN pw.points\n",
+        "      ELSE 0\n",
+        "    END), 0) AS completed_season_points\n",
         "  FROM draft_picks p\n",
         "  LEFT JOIN workspace.sleeper_core.dim_players pl ON p.player_id = pl.player_id\n",
         "  LEFT JOIN workspace.sleeper_core.fact_player_week_enriched pw\n",
         "    ON p.cluster_key = pw.cluster_key\n",
         "    AND p.player_id = pw.player_id\n",
         "    AND CAST(pw.season AS INT) >= CAST(p.season AS INT)\n",
-        "  GROUP BY p.cluster_key, p.season, p.round, p.pick_no, p.roster_id, p.player_id, pl.full_name, pl.position\n",
+        "  LEFT JOIN league_season_bounds lsb ON p.cluster_key = lsb.cluster_key\n",
+        "  GROUP BY\n",
+        "    p.cluster_key, p.season, p.round, p.pick_no, p.roster_id, p.player_id, pl.full_name, pl.position,\n",
+        "    lsb.first_season, lsb.current_season\n",
         ")\n",
         "SELECT\n",
-        "  cp.*,\n",
+        "  cp.cluster_key,\n",
+        "  cp.draft_season,\n",
+        "  cp.round,\n",
+        "  cp.pick_no,\n",
+        "  cp.roster_id,\n",
+        "  cp.player_id,\n",
+        "  cp.full_name,\n",
+        "  cp.position,\n",
+        "  cp.total_career_points,\n",
+        "  ROUND(cp.completed_season_points / NULLIF(cp.completed_seasons, 0), 1) AS points_per_season,\n",
+        "  cp.seasons_played,\n",
+        "  cp.completed_seasons,\n",
+        "  cp.games_played,\n",
         "  mr.manager_display_name AS drafted_by,\n",
         "  CONCAT(draft_season, ' Round ', round, ' Pick ', pick_no) AS pick_description\n",
         "FROM career_points cp\n",
@@ -359,7 +418,15 @@
       "name": "636a7375",
       "displayName": "Worst Draft Picks (Busts)",
       "queryLines": [
-        "WITH draft_picks AS (\n",
+        "WITH league_season_bounds AS (\n",
+        "  SELECT\n",
+        "    lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_')) AS cluster_key,\n",
+        "    MIN(season) AS first_season,\n",
+        "    MAX(season) AS current_season\n",
+        "  FROM workspace.sleeper_raw.sleeper_league_info_snapshot\n",
+        "  GROUP BY lower(regexp_replace(coalesce(name,'unknown'), '[^a-zA-Z0-9]+', '_'))\n",
+        "),\n",
+        "draft_picks AS (\n",
         "  SELECT\n",
         "    dr.season,\n",
         "    CAST(dp.round AS INT) AS round,\n",
@@ -382,19 +449,47 @@
         "    p.player_id,\n",
         "    pl.full_name,\n",
         "    pl.position,\n",
+        "    lsb.first_season,\n",
+        "    lsb.current_season,\n",
         "    COALESCE(SUM(pw.points), 0) AS total_career_points,\n",
         "    COUNT(DISTINCT pw.season) AS seasons_played,\n",
-        "    COUNT(*) AS games_played\n",
+        "    COUNT(*) AS games_played,\n",
+        "    COUNT(DISTINCT CASE\n",
+        "      WHEN CAST(pw.season AS INT) < CAST(lsb.current_season AS INT)\n",
+        "        AND CAST(pw.season AS INT) > CAST(lsb.first_season AS INT)\n",
+        "      THEN pw.season\n",
+        "    END) AS completed_seasons,\n",
+        "    COALESCE(SUM(CASE\n",
+        "      WHEN CAST(pw.season AS INT) < CAST(lsb.current_season AS INT)\n",
+        "        AND CAST(pw.season AS INT) > CAST(lsb.first_season AS INT)\n",
+        "      THEN pw.points\n",
+        "      ELSE 0\n",
+        "    END), 0) AS completed_season_points\n",
         "  FROM draft_picks p\n",
         "  LEFT JOIN workspace.sleeper_core.dim_players pl ON p.player_id = pl.player_id\n",
         "  LEFT JOIN workspace.sleeper_core.fact_player_week_enriched pw\n",
         "    ON p.cluster_key = pw.cluster_key\n",
         "    AND p.player_id = pw.player_id\n",
         "    AND CAST(pw.season AS INT) >= CAST(p.season AS INT)\n",
-        "  GROUP BY p.cluster_key, p.season, p.round, p.pick_no, p.roster_id, p.player_id, pl.full_name, pl.position\n",
+        "  LEFT JOIN league_season_bounds lsb ON p.cluster_key = lsb.cluster_key\n",
+        "  GROUP BY\n",
+        "    p.cluster_key, p.season, p.round, p.pick_no, p.roster_id, p.player_id, pl.full_name, pl.position,\n",
+        "    lsb.first_season, lsb.current_season\n",
         ")\n",
         "SELECT\n",
-        "  cp.*,\n",
+        "  cp.cluster_key,\n",
+        "  cp.draft_season,\n",
+        "  cp.round,\n",
+        "  cp.pick_no,\n",
+        "  cp.roster_id,\n",
+        "  cp.player_id,\n",
+        "  cp.full_name,\n",
+        "  cp.position,\n",
+        "  cp.total_career_points,\n",
+        "  ROUND(cp.completed_season_points / NULLIF(cp.completed_seasons, 0), 1) AS points_per_season,\n",
+        "  cp.seasons_played,\n",
+        "  cp.completed_seasons,\n",
+        "  cp.games_played,\n",
         "  mr.manager_display_name AS drafted_by,\n",
         "  CONCAT(draft_season, ' Round ', round, ' Pick ', pick_no) AS pick_description\n",
         "FROM career_points cp\n",
@@ -2225,6 +2320,962 @@
             "x": 0,
             "y": 16,
             "width": 6,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "3255fe44",
+      "displayName": "Player Performance",
+      "layout": [
+        {
+          "widget": {
+            "name": "c8e084a9",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "69d97b3d",
+                  "fields": [
+                    {
+                      "name": "sum(points_when_started)",
+                      "expression": "SUM(`points_when_started`)"
+                    },
+                    {
+                      "name": "player_name",
+                      "expression": "`player_name`"
+                    },
+                    {
+                      "name": "rank",
+                      "expression": "`rank`"
+                    },
+                    {
+                      "name": "manager_display_name",
+                      "expression": "`manager_display_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "heatmap",
+              "encodings": {
+                "x": {
+                  "fieldName": "rank",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Rank"
+                },
+                "y": {
+                  "fieldName": "manager_display_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Manager"
+                },
+                "color": {
+                  "fieldName": "sum(points_when_started)",
+                  "scale": {
+                    "type": "quantitative",
+                    "colorRamp": {
+                      "mode": "scheme",
+                      "scheme": "orangered"
+                    },
+                    "reverse": false,
+                    "domain": {
+                      "min": 200
+                    }
+                  },
+                  "legend": {
+                    "title": "Points When Started"
+                  }
+                },
+                "label": {
+                  "show": false
+                },
+                "extra": [
+                  {
+                    "fieldName": "player_name",
+                    "displayName": "Player"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top 10 Scorers by Manager"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "51b5660b",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "69d97b3d",
+                  "fields": [
+                    {
+                      "name": "player_name",
+                      "expression": "`player_name`"
+                    },
+                    {
+                      "name": "manager_display_name",
+                      "expression": "`manager_display_name`"
+                    },
+                    {
+                      "name": "points_when_started",
+                      "expression": "`points_when_started`"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`rank` IN (1)"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "manager_display_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "Manager"
+                },
+                "y": {
+                  "fieldName": "points_when_started",
+                  "scale": {
+                    "type": "quantitative",
+                    "domain": {
+                      "min": 200
+                    },
+                    "reverse": false
+                  },
+                  "displayName": "Points When Started"
+                },
+                "color": {
+                  "fieldName": "player_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Player"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top Scorer by Manager"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "f6acc33b",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "4428e5ef",
+                  "fields": [
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    },
+                    {
+                      "name": "position",
+                      "expression": "`position`"
+                    },
+                    {
+                      "name": "games_started",
+                      "expression": "`games_started`"
+                    },
+                    {
+                      "name": "ppg_started",
+                      "expression": "`ppg_started`"
+                    },
+                    {
+                      "name": "games_healthy_benched",
+                      "expression": "`games_healthy_benched`"
+                    },
+                    {
+                      "name": "ppg_healthy_benched",
+                      "expression": "`ppg_healthy_benched`"
+                    },
+                    {
+                      "name": "bench_advantage_with_decision",
+                      "expression": "`bench_advantage_with_decision`"
+                    },
+                    {
+                      "name": "total_decision_games",
+                      "expression": "`total_decision_games`"
+                    },
+                    {
+                      "name": "total_games",
+                      "expression": "`total_games`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "full_name",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "Player",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "position",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 1,
+                    "title": "Position",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "games_started",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "Games Started",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "ppg_started",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "PPG Started",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "games_healthy_benched",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "title": "Games Benched",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "description": "Excludes injuries/byes/etc"
+                  },
+                  {
+                    "fieldName": "ppg_healthy_benched",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "PPG Benched",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "bench_advantage_with_decision",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "title": "Benched Delta",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "total_decision_games",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "title": "Total Decisions",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "total_games",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 8,
+                    "title": "Total Games",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "description": "Includes injury/byes"
+                  }
+                ]
+              },
+              "invisibleColumns": [
+                {
+                  "numberFormat": "0",
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "games_benched",
+                  "type": "integer",
+                  "displayAs": "number",
+                  "order": 9,
+                  "title": "games_benched",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                }
+              ],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": false,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Better on the Bench"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 16,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "79a34fcd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "4428e5ef",
+                  "fields": [
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    },
+                    {
+                      "name": "position",
+                      "expression": "`position`"
+                    },
+                    {
+                      "name": "games_started",
+                      "expression": "`games_started`"
+                    },
+                    {
+                      "name": "ppg_started",
+                      "expression": "`ppg_started`"
+                    },
+                    {
+                      "name": "games_healthy_benched",
+                      "expression": "`games_healthy_benched`"
+                    },
+                    {
+                      "name": "ppg_healthy_benched",
+                      "expression": "`ppg_healthy_benched`"
+                    },
+                    {
+                      "name": "bench_advantage_with_decision",
+                      "expression": "`bench_advantage_with_decision`"
+                    },
+                    {
+                      "name": "total_decision_games",
+                      "expression": "`total_decision_games`"
+                    },
+                    {
+                      "name": "total_games",
+                      "expression": "`total_games`"
+                    }
+                  ],
+                  "parameterValues": [
+                    {
+                      "keyword": "the_worst",
+                      "selection": {
+                        "values": {
+                          "dataType": "STRING",
+                          "values": [
+                            {
+                              "value": "FALSE"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "full_name",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 0,
+                    "title": "Player",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "position",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 1,
+                    "title": "Position",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "games_started",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 2,
+                    "title": "Games Started",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "ppg_started",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 3,
+                    "title": "PPG Started",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "games_healthy_benched",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 4,
+                    "title": "Games Benched",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "description": "Excludes injuries/byes/etc"
+                  },
+                  {
+                    "fieldName": "ppg_healthy_benched",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "PPG Benched",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "bench_advantage_with_decision",
+                    "numberFormat": "0.00",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 6,
+                    "title": "Benched Delta",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "total_decision_games",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 7,
+                    "title": "Total Decisions",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false
+                  },
+                  {
+                    "fieldName": "total_games",
+                    "numberFormat": "0",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 8,
+                    "title": "Total Games",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "description": "Includes injury/byes"
+                  }
+                ]
+              },
+              "invisibleColumns": [
+                {
+                  "numberFormat": "0",
+                  "booleanValues": [
+                    "false",
+                    "true"
+                  ],
+                  "imageUrlTemplate": "{{ @ }}",
+                  "imageTitleTemplate": "{{ @ }}",
+                  "imageWidth": "",
+                  "imageHeight": "",
+                  "linkUrlTemplate": "{{ @ }}",
+                  "linkTextTemplate": "{{ @ }}",
+                  "linkTitleTemplate": "{{ @ }}",
+                  "linkOpenInNewTab": true,
+                  "name": "games_benched",
+                  "type": "integer",
+                  "displayAs": "number",
+                  "order": 9,
+                  "title": "games_benched",
+                  "allowSearch": false,
+                  "alignContent": "right",
+                  "allowHTML": false,
+                  "highlightLinks": false,
+                  "useMonospaceFont": false,
+                  "preserveWhitespace": false
+                }
+              ],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": false,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Better in the Lineup"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 16,
+            "width": 3,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "7eba9a2a",
+      "displayName": "Draft Analysis",
+      "layout": [
+        {
+          "widget": {
+            "name": "cac7d047",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8bacf339",
+                  "fields": [
+                    {
+                      "name": "draft_season",
+                      "expression": "`draft_season`"
+                    },
+                    {
+                      "name": "points_per_season",
+                      "expression": "`points_per_season`"
+                    },
+                    {
+                      "name": "full_name",
+                      "expression": "`full_name`"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`position` IN ('QB')"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "points_per_season",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "full_name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "x-reversed"
+                    }
+                  }
+                },
+                "color": {
+                  "fieldName": "draft_season",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Most Points Per Season - QB"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 3,
             "height": 8
           }
         }
