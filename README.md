@@ -47,10 +47,16 @@ sleeper_databricks/
 ├── src/
 │   ├── ingestion/
 │   │   └── ingestion_pipeline_sql.ipynb    # Sleeper API → Bronze tables
-│   ├── core/
-│   │   └── core_pipeline_sql.ipynb         # Bronze → Core dimensions/facts
-│   ├── trades/
-│   │   └── trades_pipeline_sql.ipynb       # Core → Trade analysis tables
+│   ├── core/                                # Bronze → Core dimensions/facts
+│   │   ├── dimensions.ipynb                #   - League clusters, managers, ownership, drafts
+│   │   ├── facts.ipynb                     #   - Player weekly stats, team performance
+│   │   └── aggregates.ipynb                #   - Career totals, consistency, H2H records
+│   ├── trades/                              # Core → Trade analysis tables
+│   │   ├── trades_dimensions.ipynb         #   - Trade metadata, staging, completeness
+│   │   ├── trades_facts.ipynb              #   - Player/pick assets, career attribution
+│   │   └── trades_aggregates.ipynb         #   - Trade impact, winners, enriched views
+│   ├── marts/
+│   │   └── marts_pipeline_sql.ipynb        # Business-ready reporting views
 │   └── fun_analysis/
 │       └── worst_trade_reveal.ipynb        # Analysis notebook (not in DLT)
 ├── resources/                               # Pipeline YAML configs
@@ -58,39 +64,77 @@ sleeper_databricks/
 ```
 
 ### Pipeline Execution Order
-1. **Ingestion Pipeline**: Fetches raw data from Sleeper API → Bronze layer
-2. **Core Pipeline**: Transforms bronze data → Core dimensions and facts
-3. **Trades Pipeline**: Joins core tables → Trade analysis aggregations
+1. **Ingestion Pipeline**: Fetches raw data from Sleeper API → Bronze layer (`sleeper_raw` schema)
+2. **Core Pipeline**: Transforms bronze data → Core dimensions/facts/aggregates (`sleeper_core` schema)
+   - Organized as modular notebooks (dimensions → facts → aggregates)
+3. **Trades Pipeline**: Joins core tables → Trade analysis (`sleeper_trades` schema)
+   - Depends on core pipeline completion via `pipelines.dependencies` configuration
+4. **Marts Pipeline**: Business-ready views for dashboards and reports (`sleeper_marts` schema)
 
 ## Key Data Models
 
-### Core Pipeline ([core_pipeline_sql.ipynb](sleeper_databricks/src/core/core_pipeline_sql.ipynb))
+### Core Pipeline
 
-**Dimension Tables:**
+**Dimensions** ([dimensions.ipynb](sleeper_databricks/src/core/dimensions.ipynb))
 - `dim_league_clusters`: League groups tracked across seasons (cluster_key mapping)
 - `dim_manager_roster_map`: Manager identity with username alias reconciliation
-- `dim_players`: Player dimension with names, positions, team affiliations
 - `dim_player_ownership`: Complete ownership lifecycle (acquisition → departure) with cross-season matching
+- `dim_draft_metadata`: Draft configuration with pre-calculated pick numbers (snake/linear logic)
+- `dim_draft_picks`: Complete draft pick information with manager names and drafted players
 
-**Fact Tables:**
-- `fact_player_week_enriched`: Weekly fantasy points with cluster_key for dynasty analysis
-- `fact_transactions`: All roster transactions (trades, waivers, drops) from Sleeper API
+**Facts** ([facts.ipynb](sleeper_databricks/src/core/facts.ipynb))
+- `fact_team_week`: Weekly team performance (points for/against, wins/losses)
+- `fact_player_week`: Weekly player fantasy points with starter/bench tracking
+- `fact_player_week_enriched`: Player weekly stats with cluster_key for dynasty analysis
+- `fact_standings_week`: Historical weekly standings and playoff positions
+- `fact_waiver_acquisitions`: Waiver wire activity with FAAB tracking
 
-### Trades Pipeline ([trades_pipeline_sql.ipynb](sleeper_databricks/src/trades/trades_pipeline_sql.ipynb))
+**Aggregates** ([aggregates.ipynb](sleeper_databricks/src/core/aggregates.ipynb))
+- `agg_consistency_metrics`: Team scoring variability (stddev, coefficient of variation)
+- `agg_rivalry_head_to_head`: Manager vs manager all-time records
+- `agg_records_all_time`: League-wide high/low scoring records
+- `agg_player_roster_totals`: Player career totals by roster
+- `agg_draft_roi_by_round`: Draft pick value analysis by round
 
-**Asset Extraction:**
+### Trades Pipeline
+
+**Dimensions** ([trades_dimensions.ipynb](sleeper_databricks/src/trades/trades_dimensions.ipynb))
+- `stg_trade_transactions`: Staging table for completed trades with league context
+- `dim_trade_metadata`: Trade metadata with league type and cluster information
+- `dim_trade_completeness`: Tracks whether all draft picks in a trade have been realized
+
+**Facts** ([trades_facts.ipynb](sleeper_databricks/src/trades/trades_facts.ipynb))
 - `fact_trade_player_assets`: Players involved in trades (directional: incoming/outgoing per roster)
+- `fact_trade_player_points_multi_season`: Career points for traded players (from trade date forward)
 - `fact_trade_pick_assets`: Draft picks involved in trades with original owner tracking
-
-**Value Attribution:**
-- `fact_trade_player_points_multi_season`: Career points for traded players (from trade date forward, all rosters)
 - `bridge_trade_pick_to_player`: Maps traded draft picks to drafted players (handles re-traded picks)
-- `fact_trade_pick_realization`: Draft pick career points (links picks → players → fantasy points)
+- `fact_trade_pick_points_career`: Career points for players drafted with traded picks
+- `bridge_trade_pick_unique`: Deduplicated view of traded picks (one row per unique pick)
 
-**Aggregations:**
-- `agg_trade_winners_enriched`: Complete trade impact with winner/loser determination and asset breakdowns
+**Aggregates** ([trades_aggregates.ipynb](sleeper_databricks/src/trades/trades_aggregates.ipynb))
+- `agg_trade_impact_by_horizon`: Trade value by time horizon (same season, 1yr, 2yr, career)
+- `agg_trade_impact_summary`: Trade impact with multiple time horizons aggregated
+- `agg_trade_winners`: Head-to-head trade comparison with winner determination
+- `agg_trade_winners_enriched`: Trade winners with manager names
 
 ## Technical Architecture
+
+### Modular Pipeline Design
+The core and trades pipelines are organized into modular notebooks following dimensional modeling best practices:
+
+**Benefits:**
+- **Maintainability**: Smaller, focused notebooks are easier to understand and modify
+- **Reusability**: Core dimensions (like `dim_draft_metadata`) centralize complex logic once
+- **Parallel Execution**: Databricks can potentially execute independent notebooks concurrently
+- **Clear Dependencies**: Dimensions → Facts → Aggregates progression within each pipeline
+- **Consistency**: Both core and trades follow the same organizational pattern
+
+**Dependency Chain:**
+```
+Raw (Bronze) → Core Dimensions → Core Facts → Core Aggregates
+                      ↓
+              Trades Dimensions → Trades Facts → Trades Aggregates
+```
 
 ### Delta Live Tables (DLT)
 All pipelines use Databricks Delta Live Tables for:
@@ -98,6 +142,7 @@ All pipelines use Databricks Delta Live Tables for:
 - **Data quality enforcement**: Expectations on critical fields (non-null cluster_key, valid transaction types)
 - **Incremental processing**: Efficient updates when new Sleeper data arrives
 - **Lineage tracking**: Automatic data lineage visualization in Databricks UI
+- **Cross-pipeline dependencies**: Trades pipeline waits for core completion via `pipelines.dependencies`
 
 ### Cross-Season Tracking Design
 Sleeper creates new `league_id` values each season, breaking standard joins. This pipeline solves it with:
@@ -181,7 +226,11 @@ All critical tables have comprehensive header blocks documenting:
 - Data quality expectations
 - Upstream dependencies
 
-See [core_pipeline_sql.ipynb](sleeper_databricks/src/core/core_pipeline_sql.ipynb) and [trades_pipeline_sql.ipynb](sleeper_databricks/src/trades/trades_pipeline_sql.ipynb) for examples.
+See core pipeline notebooks ([dimensions.ipynb](sleeper_databricks/src/core/dimensions.ipynb), [facts.ipynb](sleeper_databricks/src/core/facts.ipynb), [aggregates.ipynb](sleeper_databricks/src/core/aggregates.ipynb)) and trades pipeline notebooks for examples.
+
+### Memory Files
+Project-specific documentation and findings are stored in [.claude/](.claude/):
+- [databricks_notebook_format.md](.claude/databricks_notebook_format.md): Required structure for programmatically creating Databricks notebooks
 
 ### External Resources
 - [Databricks Asset Bundles Documentation](https://docs.databricks.com/dev-tools/bundles/index.html)

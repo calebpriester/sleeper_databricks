@@ -17,17 +17,19 @@ resources:
       schema: ${resources.schemas.sleeper_core.name}
       serverless: true
       libraries:
-        - notebook:
-            path: ../src/core/core_pipeline_sql.ipynb
+        - glob:
+            include: ../src/core/**
 
     sleeper_trades_pipeline:
       name: sleeper_trades
       catalog: ${resources.schemas.sleeper_trades.catalog_name}
       schema: ${resources.schemas.sleeper_trades.name}
       serverless: true
+      configuration:
+        pipelines.dependencies: sleeper_core_pipeline
       libraries:
-        - notebook:
-            path: ../src/trades/trades_pipeline_sql.ipynb
+        - glob:
+            include: ../src/trades/**
 
     sleeper_marts_pipeline:
       name: sleeper_marts
